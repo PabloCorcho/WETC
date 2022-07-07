@@ -1,0 +1,9 @@
+README.md
+setup.cfg
+setup.py
+src/wetc/__init__.py
+src/wetc/signal2noise.py
+src/wetc.egg-info/PKG-INFO
+src/wetc.egg-info/SOURCES.txt
+src/wetc.egg-info/dependency_links.txt
+src/wetc.egg-info/top_level.txt
