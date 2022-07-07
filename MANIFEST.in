@@ -1,0 +1,6 @@
+include *.txt
+include *.toml
+include LICENSE
+include tox.ini
+recursive-include src/wetc *
+
