@@ -7,7 +7,6 @@ Author: Pablo Corcho-Caballero
 Author-email: pablo.corcho@uam.es
 License: LICENSE.txt
 Project-URL: Bug Tracker, https://github.com/pypa/sampleproject/issues
-Platform: UNKNOWN
 Classifier: Programming Language :: Python :: 3
 Classifier: License :: OSI Approved :: GNU License
 Classifier: Operating System :: OS Independent
@@ -16,4 +15,3 @@ Description-Content-Type: text/markdown
 
 # WEAVE Exposure Time Calculator
 TBD
-

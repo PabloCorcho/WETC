@@ -9,6 +9,7 @@ Created on Sat Jul  2 10:12:26 2022
 import numpy as np
 from matplotlib import pyplot as plt
 from wetc import signal2noise
+import os
 
 # Fiber injection f/ratio
 fFP = 3.2
@@ -25,7 +26,6 @@ LIFU = True
 offset = 0.1
 profile = 'Moffat'
 betam = 2.5
-
 
 
 eff = None  # Efficiency
@@ -106,14 +106,32 @@ S = signal2noise.Signal(offset=offset,
                         fiberD=fiberD,
                         fFP=fFP, fcol=fcol, fcam=fcam,
                         profile=profile,
-                        betam=betam, throughput_table=True, sky_model=True)
+                        betam=betam, throughput_table=True,
+                        sky_model=True,
+                        inc_moon=True,
+                        moon_phase='new')
 
-wave, f_lambda = np.loadtxt('test_spectra_24_mag_arcsec', unpack=True)
+path_to_file = os.path.join(os.path.dirname(__file__), 'test_spectra_24_mag_arcsec')
+wave, f_lambda = np.loadtxt(path_to_file, unpack=True)
 
 mags = - 2.5 * np.log10(f_lambda * wave**2 / 3e18) - 48.6
 
-snr = S.S2N_spectra(time=time, wave=wave, spectra=f_lambda.copy(),
-                    airmass=airmass, seeing=seeing, sb=sb, n_exposures=n_exp)
+snr_new = S.S2N_spectra(time=time, wave=wave, spectra=f_lambda.copy(),
+                        airmass=airmass, seeing=seeing, sb=sb, n_exposures=n_exp)
+
+S.build_sky_model(inc_moon=True, moon_phase='crescent')
+snr_crescent = S.S2N_spectra(time=time, wave=wave, spectra=f_lambda.copy(),
+                             airmass=airmass, seeing=seeing, sb=sb, n_exposures=n_exp)
+
+S.build_sky_model(inc_moon=True, moon_phase='quarter')
+snr_quarter = S.S2N_spectra(time=time, wave=wave, spectra=f_lambda.copy(),
+                            airmass=airmass, seeing=seeing, sb=sb, n_exposures=n_exp)
+S.build_sky_model(inc_moon=True, moon_phase='gibbous')
+snr_gibbous = S.S2N_spectra(time=time, wave=wave, spectra=f_lambda.copy(),
+                            airmass=airmass, seeing=seeing, sb=sb, n_exposures=n_exp)
+#S.build_sky_model(inc_moon=True, moon_phase='full')
+#snr_full = S.S2N_spectra(time=time, wave=wave, spectra=f_lambda.copy(),
+#                         airmass=airmass, seeing=seeing, sb=sb, n_exposures=n_exp)
 
 fig, axs = plt.subplots(ncols=1, nrows=3, figsize=(10, 5), sharex=True)
 ax = axs[0]
@@ -123,12 +141,17 @@ ax.axvline(4686, color='k', label=r'$g$ band')
 ax.set_ylabel(r'$F_\lambda$ (erg/s/AA/cm2/arcsec^2)')
 ax.legend()
 ax = axs[1]
-ax.plot(wave, snr['SNR'])
+ax.plot(wave, snr_new['SNR'], c='k', label='New moon')
+ax.plot(wave, snr_crescent['SNR'], c='green', label='Crescent moon')
+ax.plot(wave, snr_quarter['SNR'], c='orange', label='Quarter moon')
+ax.plot(wave, snr_gibbous['SNR'], c='red', label='Gibbous moon')
+# ax.plot(wave, snr_full['SNR'], c='fuchsia', label='Full moon')
 ax.plot(central_wl, s2n, 'ro')
 ax.axvline(4686, color='k')
 ax.set_ylabel(r'$\rm SNR/\AA$')
 # ax.set_yscale('log')
 ax.grid(visible=True, which='both')
+ax.legend(loc='center', bbox_to_anchor=(1., 0.5), framealpha=1)
 ax = axs[2]
 ax.plot(wave, S.efficiency(wave), c='g')
 ax.plot(S.waveEff,

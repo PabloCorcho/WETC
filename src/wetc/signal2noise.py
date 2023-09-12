@@ -50,6 +50,13 @@ c_linght_ang = c_linght_nm * 10
 jansky_to_cgs = 1e-23
 
 
+def mag_to_flux(mags, zero, cgs=True):
+    """Convert magnitudes to fluxes."""
+    f = (10 ** (-0.4 * mags) * zero)
+    if cgs:
+        f *= jansky_to_cgs
+    return f
+
 def totalSeeing(seeing):
     """..."""
     return np.sqrt(seeing**2 + PRI_FWHM**2)
@@ -88,8 +95,10 @@ class Signal:
     see D. L. King 1985.
     - extinction_wl: (array) extinction wavelength array.
     - sky_model: (bool, default=True) Set to True for building a sky model interpolating several photometric bands
-    - sky_roque_mag: (array) default sky brightness model (Benn & Ellison 1989).
-    - sky_roque_zero: (array) default sky model photometric zero point.
+    - inc_moon: (bool, default=False) Wheter to include moon birghtness on sky model.
+    - moon_phase: (str, default='new') Moon phase to include on sky model.
+    - sky_roque_mag: (array) default sky brightness model (Benn & Ellison 1999, https://arxiv.org/abs/astro-ph/9909153).
+    - sky_roque_zero: (array) default sky model photometric zero point.s
     - sky_roque_flux: (array) default sky model flux density in
     erg/s/Hz/cm^2/arcsec^2.
     - telarea: (float) Primary mirror effective collector area (m^2).
@@ -146,10 +155,14 @@ class Signal:
                                                             'extinction_roque'), unpack=True)
     # Sky brightness
     sky_roque_mag = np.array([22.0, 22.7, 21.9, 21.0, 20.0])
+    sky_roque_moon = {'new': np.array([0, 0, 0, 0, 0]),
+                      'crescent': np.array([-0.5, -0.5, -0.5, -0.3, -0.2]),
+                      'quarter': np.array([-2.0, -2.0, -2.0, -1.3, -1.1]),
+                      'gibbous': np.array([-3.1, -3.1, -3.1, -2.4, -2.2]),
+                      'full': np.array([-4.3, -4.3, -4.3, -3.5, -3.3]),
+                      }
     sky_roque_wl = np.array([3600.0, 4400.0, 5500.0, 6400.0, 7900.0])
     sky_roque_zero = np.array([1810.0, 4260.0, 3640.0, 3080.0, 2550.0])  # Jy
-    sky_roque_flux = (10**(-0.4 * sky_roque_mag) * sky_roque_zero
-                      * jansky_to_cgs)
 
     def __init__(self,
                  LIFU=False,
@@ -157,7 +170,8 @@ class Signal:
                  QE=0.9269, fiberEff=0.8014, specEff=0.6168, pfEff=0.7564,
                  obscEff=1,
                  # Istrument specs
-                 res=5000., offset=0., fiberD=1.3045, fFP=3.2, fcol=3.1,
+                 res=5000.,
+                 offset=0., fiberD=1.3045, fFP=3.2, fcol=3.1,
                  fcam=1.8, R5000fiberD=1.3045, telD=4.2, centralObs=1.83,
                  cwave=4900.,
                  # CCD
@@ -167,7 +181,10 @@ class Signal:
                  # Tabular throughput data
                  mode='LR',
                  throughput_table=False,
-                 sky_model=True):
+                 sky_model=True,
+                 inc_moon=False,
+                 moon_phase='new'):
+
         # WHT parameters
         # telescope area after removing central obstruction
         self.telarea = np.pi * ((telD/2)**2 - (centralObs/2)**2)
@@ -181,6 +198,8 @@ class Signal:
         if LIFU:
             self.res /= 2.
             self.fiberD *= 2.
+        if mode == 'HR':
+            self.res = 10000.
 
         if throughput_table:
             self.get_throughput_table(mode)
@@ -203,8 +222,11 @@ class Signal:
 
         # Sky brightness model
         self.sky_model = sky_model
+        self.inc_moon = inc_moon
+        self.moon_phase = moon_phase
         if self.sky_model:
-            self.build_sky_model()
+            self.build_sky_model(
+                inc_moon=self.inc_moon, moon_phase=self.moon_phase)
         else:
             self.sky_photon_model = None
         # spectrograph/detector parameters
@@ -325,7 +347,7 @@ class Signal:
         if self.waveEff is None:
             return eff
         else:
-            return np.interp(wl, self.waveEff, eff)
+            return np.interp(wl, self.waveEff, eff, right=0, left=0)
 
     def effectiveArea(self, eff):
         """..."""
@@ -428,8 +450,6 @@ class Signal:
             ophot = (self.objectphotons(mag=mag, band=band, time=time,
                                         airmass=airmass, effArea=effArea)
                      * np.pi * pow(self.fiberD/2., 2))
-            print('fiberD', self.fiberD)
-            print('ophot', ophot)
         else:
             # total number of photons per spectral pixel in the fiber, circular
             # Gaussian
@@ -438,7 +458,8 @@ class Signal:
                      * self.lightfrac(seeing, self.fiberD))
         # number of photons in the sky in the fiber per pixel
         sphot = self.skyphotons(skysb=skysb, time=time,
-                                band=skyband, effArea=effArea, fiberD=self.fiberD)
+                                band=skyband, effArea=effArea,
+                                fiberD=self.fiberD)
         # full-well depth exceeded?
         if (sphot+ophot)/self.gain > self.fullwell:
             raise FullWellException('exceeded full well depth')
@@ -465,6 +486,7 @@ class Signal:
                     seeing=1.0, rn=3., dark=0., eff=None, sb=None,
                     n_exposures=1):
         """..."""
+        spectra = spectra.copy()
         # number of pixels along the slit subtended by the fiber
         npix_spatial = self.fiberCCD
         # number of pixels in 1 Angstrom
@@ -640,82 +662,76 @@ class Signal:
         - mode: (str) Resolution mode of the instrument (LR/HR).
         """
         print('  -> Loading default throughput tables for {} mode'.format(mode))
-        if mode == 'HR':
-            raise NameError('Sorry, HR throughput not implemented yet :(')
+        mode_windows = {'LR': ['blue', 'red'], 'HR': ['blue', 'green', 'red']}
+        # Read table
         path = os.path.join(os.path.dirname(__file__), 'data', 'throughput', 'throughput_{}.csv'.format(mode))
         df = pandas.read_csv(path)
-        self.waveEff_blue = df['wavelength_blue'].values * 10  # AA
-        self.waveEff_red = df['wavelength_red'].values * 10  # AA
-        self.waveEff = np.concatenate((self.waveEff_blue, self.waveEff_red))
+        # Wavelength
+        self.waveEff = np.zeros(0)
+        wave_windows = {}
+        for window in mode_windows[mode]:
+            wave_windows[window] = df['wavelength_{}'.format(window)].values * 10  # To angstrom
+            self.waveEff = np.concatenate((self.waveEff, wave_windows[window]))
         self.waveEff = (np.unique(self.waveEff))
         # Detector quantum efficiency
-        self.QE_b = df['QE_blue_opt'].values
-        self.QE_r = df['QE_red_opt'].values
-        self.QE = np.array(
-            (np.interp(self.waveEff, self.waveEff_blue, self.QE_b,
-                       left=0, right=0),
-             np.interp(self.waveEff, self.waveEff_red, self.QE_r,
-                       left=0, right=0))
-            )
-
+        self.QE = np.zeros((len(mode_windows[mode]), self.waveEff.size))
         # Fiber efficiency
-        self.fiberEff_b = df['fibre_throughput_blue_opt'].values
-        self.fiberEff_r = df['fibre_throughput_red_opt'].values
-        self.fiberEff = np.array((
-            np.interp(self.waveEff, self.waveEff_blue, self.fiberEff_b,
-                      left=0, right=0),
-            np.interp(self.waveEff, self.waveEff_red,
-                      self.fiberEff_r,
-                      left=0, right=0)))
-
+        self.fiberEff = np.zeros((len(mode_windows[mode]), self.waveEff.size))
         # Spectrograph throughput
-        self.specEff_b = df['spectrograph_throughput_blue_opt'].values
-        self.specEff_r = df['spectrograph_throughput_red_opt'].values
-        self.specEff = np.array((
-            np.interp(self.waveEff, self.waveEff_blue, self.specEff_b,
-                      left=0, right=0),
-            np.interp(self.waveEff, self.waveEff_red, self.specEff_r,
-                      left=0, right=0)))
+        self.specEff = np.zeros((len(mode_windows[mode]), self.waveEff.size))
         # Primer focus corrector eff
-        self.pfEff_b = df['prime_focus_corrector_blue_opt'].values
-        self.pfEff_r = df['prime_focus_corrector_red_opt'].values
-        self.pfEff = np.concatenate((self.pfEff_b, self.pfEff_r))
-        self.pfEff = np.array((
-            np.interp(self.waveEff, self.waveEff_blue, self.pfEff_b,
-                      left=0, right=0),
-            np.interp(self.waveEff, self.waveEff_red, self.pfEff_r,
-                      left=0, right=0)))
-        # M1 reflectivity
-        self.m1Eff_b = df['M1_blue_opt'].values
-        self.m1Eff_r = df['M1_red_opt'].values
-        self.m1Eff = np.array((
-            np.interp(self.waveEff, self.waveEff_blue, self.m1Eff_b,
-                      left=0, right=0),
-            np.interp(self.waveEff, self.waveEff_red, self.m1Eff_r,
-                      left=0, right=0)))
+        self.pfEff = np.zeros((len(mode_windows[mode]), self.waveEff.size))
+        # Primary mirror M1 reflectivity
+        self.m1Eff = np.zeros((len(mode_windows[mode]), self.waveEff.size))
         # Obscuration
-        self.obscEff_b = df['obscuration_blue_opt'].values
-        self.obscEff_r = df['obscuration_red_opt'].values
-        self.obscEff = np.concatenate((self.obscEff_b, self.obscEff_r))
-        self.obscEff = np.array((
-            np.interp(self.waveEff, self.waveEff_blue, self.obscEff_b,
-                      left=0, right=0),
-            np.interp(self.waveEff, self.waveEff_red, self.obscEff_r,
-                      left=0, right=0)))
+        self.obscEff = np.zeros((len(mode_windows[mode]), self.waveEff.size))
+        for i, window in enumerate(mode_windows[mode]):
+            self.QE[i] = np.interp(self.waveEff, wave_windows[window], df['QE_{}_opt'.format(window)].values,
+                                   left=0, right=0)
+            self.fiberEff[i] = np.interp(self.waveEff, wave_windows[window],
+                                         df['fibre_throughput_{}_opt'.format(window)].values,
+                                         left=0, right=0)
+            self.specEff[i] = np.interp(self.waveEff, wave_windows[window],
+                                        df['spectrograph_throughput_{}_opt'.format(window)].values,
+                                        left=0, right=0)
+            self.pfEff[i] = np.interp(self.waveEff, wave_windows[window],
+                                      df['prime_focus_corrector_{}_opt'.format(window)].values,
+                                      left=0, right=0)
+            self.m1Eff[i] = np.interp(self.waveEff, wave_windows[window],
+                                      df['M1_{}_opt'.format(window)].values,
+                                      left=0, right=0)
+            self.obscEff[i] = np.interp(self.waveEff, wave_windows[window],
+                                        df['obscuration_{}_opt'.format(window)].values,
+                                        left=0, right=0)
 
-    def build_sky_model(self, sky_brightness_flux=sky_roque_flux,
-                        sky_brightness_wl=sky_roque_wl):
+    def build_sky_model(self,
+                        sky_brightness_mag=sky_roque_mag,
+                        sky_brightness_mag_zero=sky_roque_zero,
+                        sky_brightness_wl=sky_roque_wl, inc_moon=False, moon_phase='new'):
         """Create an interpolator for sky photon flux (photons/AA/m^2/arcsec^2) from input sky fluxes.
 
         params
         ------
-        - sky_brightness_flux: (narray) density flux per unit wavelength (erg/s/Hz/cm2/arcsec^2).
+        - sky_brightness_mags: (narray) Sky brightness.
+        - sky_brightness_mag_zero: (narray) Zero point for each photometric point.
         - sky_brightness_wl: (narray) wavelength vector in angstrom.
+        - inc_mood: (bool, default=False) Whether to include the contribution of the Moon. This only works for default
+        sky magnitudes.
+        - moon_phase: (str, default="new") Moon phase to compute the moon brightness contribution. The current available
+         phases are "new", "crescent", "quarter", "gibbous" and "full".
         """
+        if inc_moon:
+            sky_mag = (
+                sky_brightness_mag + self.sky_roque_moon[moon_phase])
+        else:
+            sky_mag = sky_brightness_mag
+        sky_brightness_flux = mag_to_flux(
+            mags=sky_mag, zero=sky_brightness_mag_zero, cgs=True)
         f_phot = (sky_brightness_flux
                   / (planck_cgs * c_linght_ang / sky_brightness_wl))
         # convert to phot/AA/m^2/arcsec^2
         f_phot *= c_linght_ang / sky_brightness_wl**2 * 1e4
+        print("[WETC] Building Sky model\n  Moon phase: {}".format(moon_phase))
         self.sky_photon_model = interp1d(sky_brightness_wl, f_phot,
                                          fill_value='extrapolate')
 
